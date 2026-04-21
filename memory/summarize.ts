@@ -1,9 +1,4 @@
-import {
-  AIMessage,
-  HumanMessage,
-  RemoveMessage,
-  ToolMessage,
-} from "@langchain/core/messages";
+import { HumanMessage, RemoveMessage } from "@langchain/core/messages";
 import { llm } from "../nodes/llm.ts";
 import type { StateType } from "../graph/state.ts";
 import { cleanMessagesForLLM } from "../config/cleanMessages.ts";
@@ -14,12 +9,13 @@ export const summarizeConversation = async (state: StateType) => {
   console.log("summarizeConversation");
   const { summary, messages } = state;
 
-  // Các message cần summarize (cũ hơn 5)
+  // Summarize only the old messages that will be removed.
   const oldMessages = messages.slice(0, -KEEP_LAST);
+  if (oldMessages.length === 0) {
+    return {};
+  }
 
-  // Tránh lỗi tool_calls: loại các AIMessage có tool_calls và ToolMessage liên quan
-  const cleanMessages = cleanMessagesForLLM(state.messages);
-
+  const cleanMessages = cleanMessagesForLLM(oldMessages);
   if (cleanMessages.length === 0) {
     return {};
   }
@@ -27,17 +23,18 @@ export const summarizeConversation = async (state: StateType) => {
   const prompt = summary
     ? `Current summary (max 5 bullets): ${summary}
 
-Update the summary using ONLY the new information above.
+Update the summary using ONLY the new conversation messages above.
 Rules:
 - Max 5 bullet points
-- Each bullet ≤ 15 words
-- Focus on: user intent, decisions, constraints
+- Each bullet <= 15 words
+- Preserve important user intent, decisions, constraints, and preferences
 - NO examples, NO explanations`
     : `Summarize the conversation above.
 
 Rules:
 - Max 5 bullet points
-- Focus on: user intent, decisions, constraints
+- Each bullet <= 15 words
+- Focus on user intent, decisions, constraints, and preferences
 - NO examples, NO explanations`;
 
   const response = await llm.invoke([

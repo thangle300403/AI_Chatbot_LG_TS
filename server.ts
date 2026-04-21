@@ -1,7 +1,8 @@
 import http from "http";
 import jwt from "jsonwebtoken";
-import { agent } from "./graph/graph.ts";
 import { HumanMessage } from "@langchain/core/messages";
+import { Command } from "@langchain/langgraph";
+import { agent } from "./graph/graph.ts";
 import { summarizeConversation } from "./memory/summarize.ts";
 import type { StateType } from "./graph/state.ts";
 import { saveChatHistory } from "./memory/saveChatHistory.ts";
@@ -19,6 +20,18 @@ function parseCookies(req: http.IncomingMessage) {
   );
 }
 
+function writeSseData(res: http.ServerResponse, data: string) {
+  const safe = data.replace(/\n/g, "\n\n");
+  res.write(`data: ${safe}\n\n`);
+}
+
+function getFirstInterrupt(snapshot: any) {
+  const interrupts = snapshot?.tasks?.flatMap(
+    (task: any) => task?.interrupts ?? [],
+  );
+  return interrupts?.[0]?.value ?? null;
+}
+
 http
   .createServer(async (req, res) => {
     if (!req.url?.startsWith("/chat/stream")) {
@@ -30,36 +43,44 @@ http
     const url = new URL(req.url, "http://localhost");
     const q = url.searchParams.get("q") ?? "";
 
-    // ✅ LẤY COOKIE TỪ BILLSHOP
     const cookies = parseCookies(req);
     const token = cookies.access_token;
     const session_id = cookies.chatbot_session || null;
 
     let email: string | null = null;
+    let userId: number | null = null;
     if (token) {
       try {
         const decoded: any = jwt.verify(token, process.env.JWT_KEY!);
-        email = decoded.email;
+        email = decoded.email ?? null;
+
+        const rawUserId =
+          decoded.id ??
+          decoded.user_id ??
+          decoded.customer_id ??
+          decoded.sub ??
+          null;
+        const parsedUserId = Number(rawUserId);
+        userId = Number.isFinite(parsedUserId) ? parsedUserId : null;
       } catch {
-        // token invalid → fallback guest
+        // token invalid, fallback guest
       }
     }
 
-    console.log("👉 EMAIL", email);
-    console.log("👉 SESSION_ID", session_id);
+    console.log("EMAIL", email);
+    console.log("USER_ID", userId);
+    console.log("SESSION_ID", session_id);
 
-    // 👉 THREAD_ID CHUẨN
     const threadId = email ?? session_id;
+    const user = email && userId ? { id: userId, email } : null;
 
-    console.log("👉 THREAD_ID", threadId);
+    console.log("THREAD_ID", threadId);
     const origin = req.headers.origin;
-    // SSE headers
+
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
-
-      // ✅ CORS CHO SSE
       "Access-Control-Allow-Origin": origin ?? "http://localhost:3000",
       "Access-Control-Allow-Credentials": "true",
     });
@@ -67,47 +88,94 @@ http
     let finalState: any = null;
 
     try {
-      const stream = agent.streamEvents(
-        {
-          messages: [new HumanMessage(q)],
-          originalUserQuestion: q,
-          summarizeOnly: false,
-          finalAnswer: null,
-          results: [],
-          doneAgents: [],
-        },
-        {
-          configurable: { thread_id: threadId },
-          version: "v2",
-        },
-      );
-
       let synthAnswer = "";
+      let aiContent = "";
+      const config = {
+        configurable: { thread_id: threadId },
+      };
 
-      for await (const event of stream) {
-        // Stream token ra FE (chỉ node synthesize)
-        if (
-          event.event === "on_chat_model_stream" &&
-          event.metadata?.langgraph_node === "synthesize"
-        ) {
-          const token = event.data?.chunk?.content ?? "";
-          if (token) {
-            synthAnswer += token;
-            const safe = token.replace(/\n/g, "\n\n");
-            res.write(`data: ${safe}\n\n`);
-          }
+      if (q === "y" || q === "n") {
+        finalState = await agent.invoke(
+          new Command({
+            resume: q,
+            update: {
+              user,
+              summarizeOnly: false,
+            },
+          }),
+          config,
+        );
+
+        const answer =
+          finalState?.results?.[0]?.result ??
+          finalState?.messages?.[0]?.kwargs?.content ??
+          finalState?.messages?.at(-1)?.content ??
+          "";
+
+        if (typeof answer === "string" && answer.trim()) {
+          aiContent = answer.trim();
+          synthAnswer = aiContent;
+
+          console.log("AI content after approval decision:", aiContent);
+
+          writeSseData(res, aiContent);
         }
+      } else {
+        const stream = agent.streamEvents(
+          {
+            messages: [new HumanMessage(q)],
+            originalUserQuestion: q,
+            user,
+            summarizeOnly: false,
+            finalAnswer: null,
+            results: [],
+            doneAgents: [],
+          },
+          {
+            ...config,
+            version: "v2",
+          },
+        );
 
-        // Lấy finalState để dùng summarize
-        if (
-          event.event === "on_chain_end" &&
-          event.metadata?.langgraph_node === "synthesize"
-        ) {
-          finalState = event.data?.output;
+        for await (const event of stream) {
+          if (
+            event.event === "on_chat_model_stream" &&
+            event.metadata?.langgraph_node === "synthesize"
+          ) {
+            const token = event.data?.chunk?.content ?? "";
+            if (token) {
+              synthAnswer += token;
+              writeSseData(res, token);
+            }
+          }
+
+          if (
+            event.event === "on_chain_end" &&
+            event.metadata?.langgraph_node === "synthesize"
+          ) {
+            finalState = event.data?.output;
+          }
         }
       }
 
+      const snapshot = await agent.getState(config);
+      const interrupt = getFirstInterrupt(snapshot);
+      const interruptQuestion = interrupt?.question;
+      const interruptArgs = interrupt?.args ?? {};
+
+      if (!synthAnswer.trim() && interruptQuestion) {
+        const orderId = interruptArgs.order_id;
+        const confirmationText =
+          typeof orderId === "number"
+            ? `Bạn có muốn hủy đơn hàng số ${orderId} không?`
+            : interruptQuestion;
+        aiContent = confirmationText;
+        synthAnswer = confirmationText;
+        writeSseData(res, confirmationText);
+      }
+
       res.write(`data: [DONE]\n\n`);
+
       const imageBaseUrl = process.env.IMAGE_BASE_URL ?? "";
       const normalizedProducts = (finalState?.products ?? []).map((p: any) => {
         const raw = p?.image ?? "";
@@ -116,6 +184,7 @@ http
         const cleaned = raw.replace(/^\/+/, "");
         return { ...p, image: `${imageBaseUrl}/${cleaned}` };
       });
+
       if (normalizedProducts.length) {
         res.write(
           `event: products\ndata: ${JSON.stringify(normalizedProducts)}\n\n`,
@@ -123,7 +192,6 @@ http
       }
       res.end();
 
-      // LƯU CÂU HỎI KHÁCH HÀNG
       if (q?.trim()) {
         await saveChatHistory({
           email,
@@ -133,28 +201,25 @@ http
         });
       }
 
-      console.log("finalState products:", finalState.products);
-
-      // LƯU CÂU TRẢ LỜI CUỐI CÙNG CỦA SYNTH
       if (synthAnswer?.trim()) {
-        const contentPayload = {
-          answer: synthAnswer.trim(),
-          products: normalizedProducts,
-        };
+        const contentPayload =
+          q === "y" || q === "n"
+            ? aiContent || synthAnswer.trim()
+            : JSON.stringify({
+                answer: synthAnswer.trim(),
+                products: normalizedProducts,
+              });
         await saveChatHistory({
           email,
           session_id: threadId,
           role: "ai",
-          content: JSON.stringify(contentPayload),
+          content: contentPayload,
         });
       }
 
-      const fullState = await agent.getState({
-        configurable: { thread_id: threadId },
-      });
-      const fullValues = fullState?.values as StateType | undefined;
+      const fullValues = snapshot?.values as StateType | undefined;
 
-      console.log("✅ finalState.messages.length", fullValues?.messages.length);
+      console.log("finalState.messages.length", fullValues?.messages.length);
 
       if (
         fullValues &&

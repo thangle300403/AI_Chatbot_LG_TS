@@ -20,7 +20,10 @@ export const updateOrderStatusTool = tool(
       [order_id],
     );
 
+    console.log("Order query result:", rows.length);
+
     if (rows.length === 0) {
+      console.log(`Order ID ${order_id} not found!!!!!!!!!!!`);
       return {
         success: false,
         message: `Không tìm thấy đơn hàng ID = ${order_id}`,
@@ -30,6 +33,9 @@ export const updateOrderStatusTool = tool(
     const order = rows[0];
 
     if (order.customer_id !== customer_id) {
+      console.log(
+        `User ID ${customer_id} does not own order ID ${order_id}!!!!!!!!!!!`,
+      );
       return {
         success: false,
         message: "Đơn hàng không thuộc về bạn",
@@ -50,7 +56,7 @@ export const updateOrderStatusTool = tool(
       ],
       results: [
         {
-          source: "policy",
+          source: "decision",
           result: `✅ Đơn hàng ${order_id} đã được hủy thành công.`,
         },
       ],
@@ -58,10 +64,12 @@ export const updateOrderStatusTool = tool(
   },
   {
     name: "update_order_status",
+    description: "Cập nhật thông tin đơn hàng",
     schema: z.object({
       order_id: z.number(),
       order_status_id: z.literal(6),
       user_id: z.number().optional(),
     }),
+    returnDirect: true,
   },
 );

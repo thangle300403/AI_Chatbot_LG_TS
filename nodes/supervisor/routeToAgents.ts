@@ -1,17 +1,22 @@
-import { Send } from "@langchain/langgraph";
-import type { State, StateType } from "../../graph/state.ts";
+import { END, Send } from "@langchain/langgraph";
+import type { StateType } from "../../graph/state.ts";
 import { HumanMessage } from "@langchain/core/messages";
 
-export function routeToAgents(state: StateType): Send[] {
-  if (!state.agents || state.agents.length === 0) {
-    return [];
+export function routeToAgents(state: StateType) {
+  if (state.summarizeOnly) {
+    return END;
   }
 
-  return state.agents.map((a) => {
-    return new Send(a.agent, {
-      messages: [...state.messages, new HumanMessage(a.query)],
-      user: state.user,
-      summary: state.summary,
-    });
+  const nextAgent = state.agents?.[0];
+
+  if (!nextAgent) {
+    return "synthesize";
+  }
+
+  return new Send(nextAgent.agent, {
+    messages: [...state.messages, new HumanMessage(nextAgent.query)],
+    user: state.user,
+    summary: state.summary,
+    originalUserQuestion: state.originalUserQuestion,
   });
 }

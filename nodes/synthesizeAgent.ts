@@ -2,28 +2,29 @@
 import { AIMessage } from "@langchain/core/messages";
 import type { StateType } from "../graph/state.ts";
 import { llm } from "./llm.ts";
+import { cleanMessagesForLLM } from "../config/cleanMessages.ts";
 
 function normalizeMarkdown(text: string) {
-  return (
-    text
-      // list
-      .replace(/\n(\d+)\. /g, "\n\n$1. ")
-      .replace(/\n- /g, "\n\n- ")
-      // paragraph
-      .replace(/([^\n])\n([^\n])/g, "$1\n\n$2")
-      .trim()
-  );
+  return text
+    .replace(/\n(\d+)\. /g, "\n\n$1. ")
+    .replace(/\n- /g, "\n\n- ")
+    .replace(/([^\n])\n([^\n])/g, "$1\n\n$2")
+    .trim();
 }
+
 export async function synthesizeNode(state: StateType) {
   console.log("SynthesizeNode");
   const userQuestion = state.originalUserQuestion ?? "";
+  const summary = state.summary ?? "";
+  const recentMessages = cleanMessagesForLLM(state.messages);
+
   console.log("User question in synthesize:", userQuestion);
   if (!state.results || state.results.length === 0) {
     return {
-      finalAnswer: "❌ Không tìm được thông tin phù hợp để trả lời.",
+      finalAnswer: "Khong tim duoc thong tin phu hop de tra loi.",
       messages: [
         new AIMessage(
-          "Hiện tại tôi chưa có đủ dữ liệu để trả lời câu hỏi này.",
+          "Hien tai toi chua co du du lieu de tra loi cau hoi nay.",
         ),
       ],
     };
@@ -31,24 +32,25 @@ export async function synthesizeNode(state: StateType) {
 
   console.log("Number of results to synthesize:", state.results.length);
 
-  // Format kết quả từ các agent
   const context = state.results
-    .map((r, i) => `(${i + 1}) Từ ${r.source.toUpperCase()}:\n${r.result}`)
+    .map((r, i) => `(${i + 1}) From ${r.source.toUpperCase()}`)
     .join("\n\n");
 
   console.log("Context to synthesize:", context);
 
   const systemPrompt = `
-Bạn là trợ lý chuyên về cầu lông (badminton).
-Nhiệm vụ của bạn là tổng hợp thông tin từ nhiều nguồn để trả lời người dùng.
+You are a professional badminton shop assistant.
+Your job is to synthesize agent results into the final answer for the user.
 
-QUY TẮC:
-- Chỉ trả lời trong domain cầu lông
-- Không bịa thông tin
-- Khi có danh sách sản phẩm nhớ nếu số thứ tự và tên sản phẩm
-- Trả lời gọn, rõ, tự nhiên như người bán hàng chuyên nghiệp
-- Không cần hình.
-- Trả về chuẩn markdown Không trả json.
+Rules:
+- Answer only within the badminton shop domain.
+- Do not invent information.
+- Use both conversation memory sources:
+  1. the summarized old memory;
+  2. the recent unsummarized messages.
+- If product lists exist, mention product names clearly.
+- Answer naturally, concisely, and in Markdown.
+- Do not return JSON.
 `;
 
   const messages = [
@@ -56,15 +58,19 @@ QUY TẮC:
     {
       role: "user",
       content: `
-Câu hỏi:
+Original user question:
 "${userQuestion}"
 
-Thông tin:
+Summarized old memory:
+${summary || "None."}
+
+Agent information:
 ${context}
 
-Hãy tổng hợp câu trả lời cuối cùng.
+Now write the final answer using the summarized memory, recent messages, and agent information.
 `,
     },
+    ...recentMessages,
   ];
 
   const stream = await llm.stream(messages);
@@ -91,8 +97,8 @@ Hãy tổng hợp câu trả lời cuối cùng.
   const normalized = normalizeMarkdown(fullText);
 
   return {
-    finalAnswer: fullText,
+    finalAnswer: normalized,
     products: state.results.flatMap((r) => r.products ?? []),
-    messages: [new AIMessage(`🧠 [SYNTHESIZE]\n${fullText}`)],
+    messages: [new AIMessage(`[SYNTHESIZE]\n${normalized}`)],
   };
 }

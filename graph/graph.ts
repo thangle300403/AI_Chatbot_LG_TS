@@ -1,8 +1,7 @@
 // graph/agent.ts
 import "dotenv/config";
-import { StateGraph, START, END, MemorySaver } from "@langchain/langgraph";
+import { StateGraph, START, END } from "@langchain/langgraph";
 import { State } from "./state.ts";
-import type { StateType } from "./state.ts";
 import { sqlAgent } from "../nodes/sqlAgent.ts";
 import { updateAgent } from "../nodes/updateAgent.ts";
 import { consultAgentGraph } from "../nodes/consultAgent.ts";
@@ -17,32 +16,12 @@ const DB_URI =
 
 const checkpointer = PostgresSaver.fromConnString(DB_URI);
 
-export function collectNode(state: StateType) {
-  const expected = state.agents.length;
-  const done = new Set(state.doneAgents).size;
-
-  console.log("===========Expected:", expected, "Done:", done);
-
-  if (done < expected) {
-    return {};
-  }
-  return {};
-}
-
-function routeFromCollect(state: StateType) {
-  const expected = state.agents.length;
-  const done = new Set(state.doneAgents).size;
-
-  return done === expected ? "synthesize" : END;
-}
-
 const graph = new StateGraph(State)
   .addNode("router", supervisorNode)
   .addNode("sql", sqlAgent)
   .addNode("decision", updateAgent)
   .addNode("consult", consultAgentGraph)
   .addNode("policy", policyAgent)
-  .addNode("collect", collectNode)
   .addNode("synthesize", synthesizeNode)
 
   .addEdge(START, "router")
@@ -52,14 +31,14 @@ const graph = new StateGraph(State)
     "consult",
     "sql",
     "policy",
+    "synthesize",
+    END,
   ])
 
-  .addEdge("consult", "collect")
-  .addEdge("policy", "collect")
-  .addEdge("sql", "collect")
-  .addEdge("decision", END)
-
-  .addConditionalEdges("collect", routeFromCollect, ["synthesize", END])
+  .addEdge("consult", "router")
+  .addEdge("policy", "router")
+  .addEdge("sql", "router")
+  .addEdge("decision", "router")
   .addEdge("synthesize", END);
 
 export const agent = graph.compile({ checkpointer });

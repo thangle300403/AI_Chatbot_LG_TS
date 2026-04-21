@@ -146,8 +146,6 @@ async function generateNode(state: ConsultState) {
     }
   }
 
-  console.log("Number of products retrieved!", products);
-
   const systemPrompt = `You are a professional badminton consultant.
 Use the provided product information to give advice.
 If products are listed, recommend clearly and ask ONE follow-up question

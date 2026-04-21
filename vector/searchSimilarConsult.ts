@@ -13,14 +13,9 @@ export interface ProductMetadata {
 export interface ConsultProductResult {
   content: string;
   metadata: ProductMetadata;
-  similarity: number;
 }
 
-export async function searchSimilarConsult(
-  query: string,
-  topK = 5,
-  minScore = 0.5,
-) {
+export async function searchSimilarConsult(query: string, topK = 5) {
   try {
     const collections = getCollectionsByAgent("consultAgent");
 
@@ -34,32 +29,22 @@ export async function searchSimilarConsult(
     const allResults = await Promise.all(
       collections.map(async (collectionName) => {
         const vectorStore = await getVectorStore(collectionName);
-        const results = await vectorStore.similaritySearchWithScore(
-          query,
-          topK,
-        );
+        const retriever = vectorStore.asRetriever({ k: topK });
+        const docs = await retriever._getRelevantDocuments(query);
 
-        console.log(`📊 Raw results from "${collectionName}":`, results);
-
-        return results.map(([doc, distance]) => {
-          const similarity = 1 - Math.min(Math.max(distance, 0), 1);
-          return {
-            content: doc.pageContent,
-            metadata: {
-              ...(doc.metadata as ProductMetadata),
-              collection: collectionName,
-            },
-            similarity,
-          };
-        });
+        return docs.map((doc) => ({
+          content: doc.pageContent,
+          metadata: {
+            ...(doc.metadata as ProductMetadata),
+            collection: collectionName,
+          },
+        }));
       }),
     );
 
-    return allResults
-      .flat()
-      .filter((r) => r.similarity >= minScore)
-      .sort((a, b) => b.similarity - a.similarity)
-      .slice(0, topK);
+    console.log("✅ searchSimilarConsult results:", allResults);
+
+    return allResults.flat().slice(0, topK);
   } catch (err) {
     console.error("❌ searchSimilarConsult ERROR:", err);
     return [];

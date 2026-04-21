@@ -8,8 +8,6 @@ export const searchProductTool = tool(
     console.log(`searchProductTool called with query: "${query}"`);
     const results = await searchSimilarConsult(query, 5);
 
-    console.log(`searchProductTool  results.`, results);
-
     return {
       products: results.map((r) => ({
         id: r.metadata?.product_id,

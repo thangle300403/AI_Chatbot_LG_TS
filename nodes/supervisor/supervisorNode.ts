@@ -2,22 +2,16 @@ import "dotenv/config";
 import { z } from "zod";
 import type { StateType } from "../../graph/state.ts";
 import { llm } from "../llm.ts";
-import {
-  cleanMessagesForLLM,
-  stripOrphanToolCalls,
-} from "../../config/cleanMessages.ts";
+import { cleanMessagesForLLM } from "../../config/cleanMessages.ts";
 
 const RouterSchema = z.object({
-  agents: z.array(
-    z.object({
-      agent: z.enum(["sql", "consult", "decision", "policy"]),
-      query: z.string(),
-    }),
-  ),
+  action: z.enum(["call_agent", "synthesize"]),
+  agent: z.enum(["sql", "consult", "decision", "policy"]).nullable(),
+  query: z.string().nullable(),
 });
 
 export async function supervisorNode(state: StateType) {
-  const cleanMessages = stripOrphanToolCalls(state.messages);
+  const cleanMessages = cleanMessagesForLLM(state.messages);
 
   console.log("supervisorNode summarizeOnly", state.summarizeOnly);
   if (state.summarizeOnly) {
@@ -27,13 +21,26 @@ export async function supervisorNode(state: StateType) {
       doneAgents: [],
     };
   }
-  const userMessage = state.messages.at(-1)?.content ?? "";
 
-  console.log("📡 Routing message:", userMessage);
-
+  const userMessage =
+    state.originalUserQuestion ?? state.messages.at(-1)?.content ?? "";
   const summary = state.summary ?? "";
+  const previousResults = (state.results ?? [])
+    .map((r, i) => `(${i + 1}) ${r.source}: ${r.result}`)
+    .join("\n\n");
+  const calledAgents = (state.doneAgents ?? []).join(", ") || "none";
 
-  console.log("📡 Summary:", summary);
+  console.log("Routing message:", userMessage);
+  console.log("Summary:", summary);
+  console.log("Called agents:", calledAgents);
+  // console.log("Previous agent results:", previousResults);
+
+  if (
+    (state.doneAgents ?? []).length >= 4 &&
+    (state.results ?? []).length > 0
+  ) {
+    return { agents: [] };
+  }
 
   const routerLLM = llm.withStructuredOutput(RouterSchema);
 
@@ -41,44 +48,54 @@ export async function supervisorNode(state: StateType) {
     {
       role: "system",
       content: `
-Bạn là SUPERVISOR của hệ thống chatbot bán dụng cụ cầu lông.
+You are the SUPERVISOR of a badminton shop chatbot.
 
-Nhiệm vụ:
-- Phân tích câu hỏi
-- Chọn 1 hoặc N agent phù hợp
-- Với mỗi agent, tạo 1 sub-query rõ ràng
+Your task:
+- Analyze the user question, conversation summary, and any existing agent results.
+- If the existing results are enough to answer the user, return action = "synthesize".
+- If more information is needed, choose exactly ONE next agent and create a clear sub-query for that agent.
 
-Các agent có sẵn:
-- sql      : giá, tồn kho, danh sách, thống kê, đơn hàng
-- consult  : tư vấn chọn vợt, giày, áo, phụ kiện, phù hợp trình độ người chơi
-- decision : hủy đơn hàng
-- policy   : chính sách bảo hành, đổi trả, vận chuyển, thanh toán, điều khoản
+Available agents:
+- sql      : prices, inventory, lists, statistics, orders
+- consult  : product advice for rackets, shoes, clothes, accessories, player level
+- decision : cancel orders
+- policy   : warranty, returns, shipping, payment, terms
 
-QUY TẮC:
-- Dựa vào lịch sử để đưa ra câu hỏi cho các agent.
-- Có thể chọn nhiều agent
-- KHÔNG trả lời người dùng
-- KHÔNG giải thích
-- Chỉ trả JSON theo schema 
+Rules:
+- Do not answer the user.
+- Do not explain.
+- Do not choose multiple agents.
+- After each agent result, you will be called again to evaluate whether the task is done.
+- Avoid calling the same agent again unless the previous result is clearly insufficient.
+- If enough data exists, or too many agents have already been called, return action = "synthesize".
+- Return only JSON matching the schema.
 `,
     },
     {
       role: "user",
       content: `
-Câu hỏi hiện tại:
-${userMessage}.\n
-Tóm lược các đoạn hội thoại đã có trước 5 câu hỏi gần nhất:
-${summary}\n
+Current user question:
+${userMessage}
+
+Already called agents:
+${calledAgents}
+
+Existing agent results:
+${previousResults || "No agent results yet."}
+
+Conversation summary:
+${summary}
       `,
     },
     ...cleanMessages,
   ]);
 
-  console.log("📦 Router decision:", JSON.stringify(res.agents, null, 2));
+  console.log("Router decision:", JSON.stringify(res, null, 2));
 
   return {
-    agents: res.agents,
-    results: [],
-    doneAgents: [],
+    agents:
+      res.action === "call_agent" && res.agent && res.query
+        ? [{ agent: res.agent, query: res.query }]
+        : [],
   };
 }
